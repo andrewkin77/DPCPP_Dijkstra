@@ -4,14 +4,24 @@
 using namespace sycl;
 static const int N = 5;
 static const int M = 6;
-static const int thr = 4;
+static const int thr = 1000;
 static const int s = 0;
 
-//#define DEBUG
+// #define DEBUG
+
+struct pair {
+    bool operator<(const pair& o) const {
+    return val < o.val;
+    }
+    double val;
+    int vertex;
+};
+
+using minloc = sycl::ext::oneapi::minimum<pair>;
 
 int main(){
     // define queue which has default device associated for offload
-    queue q;
+    queue q(gpu_selector{});
     std::cout << "Device: " << q.get_device().get_info<info::device::name>() << std::endl;
 
     int _Adj[2*M] = {1, 2, 4, 0, 3, 0, 3, 1, 2, 4, 0, 3};
@@ -29,12 +39,9 @@ int main(){
     int *delta = malloc_shared<int>(1, q);
     int *rem = malloc_shared<int>(1, q);
     int *u = malloc_shared<int>(1, q);
+    pair* glob_min = malloc_shared<pair>(1, q);
     double min;
 
-    // aux
-    double *aux_min = malloc_shared<double>(thr, q);
-    int *aux_vert = malloc_shared<int>(thr, q);
-    int *aux_qsize = malloc_shared<int>(thr, q);
 
     // Initialization
     q.parallel_for(range<1>(N), [=] (id<1> ind){
@@ -42,6 +49,15 @@ int main(){
         Visited[ind] = 0;
         inQueue[ind] = 0;
     }).wait();
+
+    pair identity = {
+      std::numeric_limits<double>::infinity(), -1 
+    };
+    *glob_min = identity;
+
+    // reductions
+    auto min_red = sycl::reduction(glob_min, identity, minloc());
+    auto sum_red = sycl::reduction(qsize, sycl::ext::oneapi::plus<int>());
 
     for (int i = 0; i < 2*M; i++) {
         Adj[i] = _Adj[i];
@@ -53,7 +69,7 @@ int main(){
     }
 
     inQueue[s] = 1;
-    qsize[s] = 1;
+    qsize[0] = 1;
     d[s] = 0;
 
     // main loop
@@ -80,37 +96,29 @@ int main(){
         *rem = N % thr;
 
         // Searching for vertex in queue with minimum distance
-        q.parallel_for(range<1>(thr), [=] (id<1> ind) {
-            double loc_min = std::numeric_limits<double>::infinity();
-            int loc_vert = -1;
-            int start, fin;
-            if (ind < (*rem)) {
-                start = ind * (*delta + 1);
-                fin = start + (*delta) + 1;
-            } else {
-                start = ind * (*delta) + (*rem);
-                fin = start + (*delta);
-            }
-            for(int i = start; i < fin; i++) {
-                if(inQueue[i] == 1 && d[i] < loc_min) {
-                    loc_min = d[i];
-                    loc_vert = i;
+        q.submit([&](handler& h) {
+            h.parallel_for(range<1>(thr), min_red, [=] (id<1> ind, auto& glob_min) {
+                pair loc_min = {std::numeric_limits<double>::infinity(), -1};
+                int start, fin;
+                if (ind < (*rem)) {
+                    start = ind * (*delta + 1);
+                    fin = start + (*delta) + 1;
+                } else {
+                    start = ind * (*delta) + (*rem);
+                    fin = start + (*delta);
                 }
-            }
-                
-            aux_min[ind] = loc_min;
-            aux_vert[ind] = loc_vert;
+                for(int i = start; i < fin; i++) {
+                    if(inQueue[i] == 1 && d[i] < loc_min.val) {
+                        loc_min.val  = d[i];
+                        loc_min.vertex = i;
+                    }
+                }
+                glob_min.combine(loc_min);
+            });
         }).wait();
 
-        // reduction
-        *u = aux_vert[0];
-        min = aux_min[0];
-        for (int i = 1; i < thr; i++) {
-            if (aux_min[i] < min) {
-                min = aux_min[i];
-                *u = aux_vert[i];
-            }
-        }
+        *u = glob_min -> vertex;
+        *glob_min = identity;
 
         #ifdef DEBUG
             std::cout<< "Min vert: " << *u << std::endl;
@@ -124,33 +132,30 @@ int main(){
         *rem = (Xadj[(*u) + 1] - Xadj[*u]) % thr;
 
         // relaxation
-        q.parallel_for(range<1>(thr), [=] (id<1> ind) {
-            int loc_qsize = 0;
-            int start, fin;
-            if (ind < (*rem)) {
-                start = Xadj[*u] + ind * (*delta + 1);
-                fin = start + (*delta) + 1;
-            } else {
-                start = Xadj[*u] + ind * (*delta) + (*rem);
-                fin = start + (*delta);
-            }
-            for (int i = start; i < fin; i++) {
-                int z = Adj[i];
-                if (d[z] > d[*u] + Weights[i]) {
-                    d[z] = d[*u] + Weights[i];
+        q.submit([&](handler& h) {
+            h.parallel_for(range<1>(thr), sum_red, [=] (id<1> ind, auto& qsize) {
+                int loc_qsize = 0;
+                int start, fin;
+                if (ind < (*rem)) {
+                    start = Xadj[*u] + ind * (*delta + 1);
+                    fin = start + (*delta) + 1;
+                } else {
+                    start = Xadj[*u] + ind * (*delta) + (*rem);
+                    fin = start + (*delta);
                 }
-                if(!inQueue[z] && !Visited[z]) {
-                    inQueue[z] = 1;
-                    loc_qsize++;
+                for (int i = start; i < fin; i++) {
+                    int z = Adj[i];
+                    if (d[z] > d[*u] + Weights[i]) {
+                        d[z] = d[*u] + Weights[i];
+                    }
+                    if(!inQueue[z] && !Visited[z]) {
+                        inQueue[z] = 1;
+                        loc_qsize++;
+                    }
                 }
-            }
-            aux_qsize[ind] = loc_qsize;
+                qsize.combine(loc_qsize);
+            });
         }).wait();
-
-        // reduction
-        for (int i = 0; i < thr; i++) {
-            qsize[0] += aux_qsize[i];
-        }
     }
 
     // Print Output
@@ -168,8 +173,6 @@ int main(){
     free(delta, q);
     free(rem, q);
     free(u, q);
-    free(aux_min, q);
-    free(aux_qsize, q);
-    free(aux_vert, q);
+    free(glob_min, q);
     return 0;
 }
