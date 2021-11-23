@@ -2,14 +2,13 @@
 #include <algorithm>
 #include "dpcpp_dijkstra.h"
 
-static const int thr = 10;
 using namespace sycl;
 
 //#define DEBUG
 
 using minloc = sycl::ext::oneapi::minimum<pair>;
 
-int dpcpp_dijkstra(crsGraph &gr, int s, queue &q) {
+int dpcpp_dijkstra(crsGraph &gr, int s, const int thr, queue &q) {
 
     // Unified Shared Memory Allocation enables data access on host and device
     int *Visited = malloc_shared<int>(gr.V, q);

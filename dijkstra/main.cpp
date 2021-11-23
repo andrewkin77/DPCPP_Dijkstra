@@ -1,4 +1,5 @@
 #include "dpcpp_dijkstra.h"
+#include <chrono>
 
 using namespace sycl;
 
@@ -26,7 +27,16 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Starting dijkstra" << std::endl;
     /* Calculating SSSP array */
-    int err = dpcpp_dijkstra(gr, 0, q);
+    auto start = std::chrono::high_resolution_clock::now();
+    int err = dpcpp_dijkstra(gr, 0, 10, q);
+    auto stop = std::chrono::high_resolution_clock::now();
+
+    /* Calculating time */
+    std::chrono::duration<double> duration = stop - start;
+    std::cout << "Time taken by dpcpp_dijkstra: "
+         << duration.count() << " seconds" << std::endl;
+
+    /* Writing result to a txt file */
     write_arr_to_txt(gr.d, gr.V, output);
 
     /* Getting correct array to compare */ 

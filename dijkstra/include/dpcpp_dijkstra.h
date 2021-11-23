@@ -11,6 +11,6 @@ struct pair {
     int vertex;
 };
 
-int dpcpp_dijkstra(crsGraph &gr, int s, sycl::queue &q);
+int dpcpp_dijkstra(crsGraph &gr, int s, const int thr, sycl::queue &q);
 
 #endif /* dpcpp_dijkstra.h */
